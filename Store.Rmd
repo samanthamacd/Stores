@@ -1,0 +1,206 @@
+---
+title: "ARIMA"
+output: html_document
+date: "2023-11-27"
+---
+
+27 November - SARIMA Modelling 
+
+capital letters = past seasons 
+lowercase letters = past days 
+
+autoregressive: use the past to predict the future 
+  - controls longer term correlation 
+moving averages: unique part of yesterday in the past to predict the future 
+  - these are very short term correlation 
+  
+  
+```{r}
+library(tidyverse) 
+library(tidymodels)
+library(parsnip) 
+library(modeltime)
+library(patchwork)
+library(timetk)
+library(vroom)
+
+train <- vroom('train.csv')
+test <- vroom('test.csv')
+
+storeItem1 <- train %>% 
+  dplyr::filter(store == 5, item == 13)
+storeItem2 <- train %>% 
+  dplyr::filter(store == 7, item == 46) 
+
+storeItemTest1 <- test %>% 
+  filter(store == 5, item == 13) 
+storeItemTest2 <- test %>% 
+  filter(store == 7, item == 46)
+
+split1 <- time_series_split(storeItem1, assess="3 months", cumulative = TRUE) 
+split2 <- time_series_split(storeItem2, assess="3 months", cumulative = TRUE)
+
+arima_recipe <- recipe(sales ~., train) %>% 
+  step_date(date, features = "dow") %>%  
+  step_holiday(date) 
+
+arima_model1 <- arima_reg(seasonal_period = 365, 
+                         non_seasonal_ar = 5, 
+                         non_seasonal_ma = 5, 
+                         seasonal_ar = 2, 
+                         seasonal_ma = 2, 
+                         non_seasonal_differences = 2, 
+                         seasonal_differences = 2) %>% 
+  set_engine("auto_arima")
+
+arima_model2 <- arima_reg(seasonal_period = 365, 
+                         non_seasonal_ar = 5, 
+                         non_seasonal_ma = 5, 
+                         seasonal_ar = 2, 
+                         seasonal_ma = 2, 
+                         non_seasonal_differences = 2, 
+                         seasonal_differences = 2) %>% 
+  set_engine("auto_arima")
+
+arima_wf1 <- workflow() %>% 
+  add_recipe(arima_recipe) %>% 
+  add_model(arima_model1) %>% 
+  fit(data=training(split1))
+
+arima_wf2 <- workflow() %>% 
+  add_recipe(arima_recipe) %>% 
+  add_model(arima_model2) %>% 
+  fit(data=training(split2))
+
+
+cv_results1 <- modeltime_calibrate(arima_wf1, 
+                                  new_data = testing(split1)) 
+
+cv_results2 <- modeltime_calibrate(arima_wf2, 
+                                  new_data = testing(split2)) 
+
+## Visualize - TOP ROW 
+si1_top <- cv_results1 %>% 
+  modeltime_forecast(
+    new_data = testing(split1), 
+    actual_data = storeItem1
+  ) %>% 
+  plot_modeltime_forecast(.interactive = TRUE) 
+
+si2_top <- cv_results2 %>% 
+  modeltime_forecast(
+    new_data = testing(split2), 
+    actual_data = storeItem2
+  ) %>% 
+  plot_modeltime_forecast(.interactive = TRUE) 
+
+### 
+cv_results1 %>% 
+  modeltime_accuracy() %>% 
+  table_modeltime_accuracy(
+    .interactive = FALSE
+  )
+
+cv_results2 %>% 
+  modeltime_accuracy() %>% 
+  table_modeltime_accuracy(
+    .interactive = FALSE
+  )
+### 
+
+es_fullfit1 <- cv_results1 %>% 
+  modeltime_refit(data = storeItem1) 
+
+es_fullfit2 <- cv_results2 %>% 
+  modeltime_refit(data = storeItem2) 
+
+si1bottom <- es_fullfit1 %>% 
+  modeltime_forecast(new_data = storeItemTest1, actual_data = storeItem1) %>% 
+  plot_modeltime_forecast(.interactive =TRUE) 
+
+si2bottom <- es_fullfit2 %>% 
+  modeltime_forecast(new_data = storeItemTest2, actual_data = storeItem2) %>% 
+  plot_modeltime_forecast(.interactive =FALSE) 
+
+plotly::subplot(si1_top, si2_top, si1bottom, si2bottom, nrows=2)
+
+```
+
+
+29 November - Facebook's Prophet Models 
+
+This isn't actually a time series model at all - it's a penalized regression model 
+   - feature engineers common time series features automatically!          - has trend, season, and holiday 
+   - uses the change point model: 
+         - use some change point C (any date you want) 
+             - fit a regression for data before and after that C 
+not worried about overfitting because this is penalized linear regression 
+
+Seasonality: sines and cosines 
+
+
+```{r}
+storeItem1 <- train %>% 
+  dplyr::filter(store == 5, item == 13)
+storeItem2 <- train %>% 
+  dplyr::filter(store == 7, item == 46) 
+
+storeItemTest1 <- test %>% 
+  filter(store == 5, item == 13) 
+storeItemTest2 <- test %>% 
+  filter(store == 7, item == 46)
+
+split1 <- time_series_split(storeItem1, assess="3 months", cumulative = TRUE) 
+split2 <- time_series_split(storeItem2, assess="3 months", cumulative = TRUE)
+
+
+prophet_model1 <- prophet_reg() %>% 
+  set_engine("prophet") %>% 
+  fit(sales ~ date, data = training(split1)) 
+
+prophet_model2 <- prophet_reg() %>% 
+  set_engine("prophet") %>% 
+  fit(sales ~ date, data = training(split2)) 
+
+cv_results_1 <- modeltime_calibrate(prophet_model1, 
+                                  new_data = testing(split1)) 
+
+cv_results_2 <- modeltime_calibrate(prophet_model2, 
+                                  new_data = testing(split2)) 
+
+si1_top1 <- cv_results_1 %>% 
+  modeltime_forecast(
+    new_data = testing(split1), 
+    actual_data = storeItem1
+  ) %>% 
+  plot_modeltime_forecast(.interactive = TRUE) 
+
+si2_top2 <- cv_results_2 %>% 
+  modeltime_forecast(
+    new_data = testing(split2), 
+    actual_data = storeItem2
+  ) %>% 
+  plot_modeltime_forecast(.interactive = TRUE) 
+
+es_fullfit_1 <- cv_results_1 %>% 
+  modeltime_refit(data = storeItem1) 
+
+es_fullfit_2 <- cv_results_2 %>% 
+  modeltime_refit(data = storeItem2) 
+
+si1_bottom <- es_fullfit_1 %>% 
+  modeltime_forecast(new_data = storeItemTest1, actual_data = storeItem1) %>% 
+  plot_modeltime_forecast(.interactive =TRUE) 
+
+si2_bottom <- es_fullfit_2 %>% 
+  modeltime_forecast(new_data = storeItemTest2, actual_data = storeItem2) %>% 
+  plot_modeltime_forecast(.interactive =FALSE) 
+
+plotly::subplot(si1_top1, si2_top2, si1_bottom, si2_bottom, nrows=2)
+
+```
+
+1 December - Store Item Wrap-up 
+
+#How to submit the kaggle: 
+  - 

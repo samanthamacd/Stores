@@ -1,0 +1,254 @@
+---
+title: "13, 15, 17 Nov"
+output: html_document
+date: "2023-11-13"
+---
+
+13 November 
+
+Principles of Time Series Analysis 
+  - time series data is, generally, any data that's collected over time 
+  - when people say time series, they usually mean that the only data is the response and the timestamp 
+  - time series regression is a time series with other explanatory variables in addition to the time stamp 
+
+How do we approach this from a machine learning perspective? 
+  - structure: cyclical behaviors 
+  - overall positive trend 
+  
+Autocorrelation - correlation from time point to time point 
+Lag - difference in time; lag of 1 are data points separated by 1 time step 
+Autocorrelation Function - what the autocorrelation is at any lag 
+   - what do these plots show? patterns; every week things are related 
+Trend - the overall season-over-season pattern in the data 
+Season length - length of a single cycle 
+Seasonal Variation - the cycle within a season 
+Stationary Process - a time series who's properties don't change over time 
+Forecast - predict forward in time 
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(patchwork)
+library(vroom)
+
+train <- vroom('train.csv')
+test <- vroom('test.csv')
+
+nStores <- max(train$store)
+nItems <- max(train$item)
+
+storeItemTrain1 <- train %>%
+  filter(store==4, item==12)
+
+one <- storeItemTrain1 %>% 
+  pull(sales) %>% 
+  forecast::ggAcf(., lag.max=2*365)
+
+storeItemTrain2 <- train %>%
+  filter(store==3, item==45)
+
+two <- storeItemTrain2 %>% 
+  pull(sales) %>% 
+  forecast::ggAcf(., lag.max=2*365)
+
+storeItemTrain3 <- train %>%
+  filter(store==7, item==23)
+
+three <- storeItemTrain3 %>% 
+  pull(sales) %>% 
+  forecast::ggAcf(., lag.max=2*365)
+
+storeItemTrain4 <- train %>%
+  filter(store==2, item==34)
+
+four <- storeItemTrain4 %>% 
+  pull(sales) %>% 
+  forecast::ggAcf(., lag.max=2*365)
+
+(one + two) / (three + four)
+
+```
+
+15 November 
+
+Because there are so many store and item combos, we're not actually going to submit to kaggle until the kaggle comp is due 
+  - for initial model building, we're just going to pick one store and one item 
+       - once we do this, the date and the sales is all that we're interested in 
+       
+What do we do with only date and sales? 
+  - pull features out of the Date category! 
+       - holidays, day of the week, month, 
+       - be careful with what's numeric and a factor
+       
+  - for autocorrelation, lagged data as predictors may help 
+```{r}
+library(parsnip)
+library(tidyverse)
+
+storeItem <- train %>% 
+  filter(store == 5, item == 13) 
+
+storeRecipe <- recipe(sales ~., train) %>% 
+  step_date(date, features = "dow") %>%  
+  step_holiday(role = "predictor")
+# step_naomit(all_predictors()) 
+  # doing sin/cos because seasons are cyclic = numeric predictor 
+
+my_mod <- rand_forest(mtry = tune(),
+                      min_n = tune(),
+                      trees = 500) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+wf <- workflow() %>% 
+  add_recipe(storeRecipe) %>% 
+  add_model(my_mod) %>% 
+  fit(storeItem)
+
+tuningGridForest <- grid_regular(min_n(), 
+                                   mtry(range=c(1,10))) 
+
+folds <- vfold_cv(train, v = 5, repeats=1)
+
+CV_results <- wf %>% 
+  tune_grid(resamples = folds, 
+            grid = tuningGridForest, 
+            metrics = metric_set(smape))
+
+bestTuneF <- CV_results %>% 
+  select_best("smape") 
+
+collect_metrics(CV_results) %>% 
+  filter(bestTuneF) %>% 
+  pull(mean) 
+
+finalwf <- wf %>% 
+  finalize_workflow(bestTuneF) %>% 
+  fit(data=train) 
+
+```
+
+
+17 November - Exponential Smoothing 
+
+This is one of many time series models 
+  - these methods rely on the ordering of the data (they'll break otherwise) 
+  - we'll talk about exponential smoothing, (s)arima, and facebook's prophet models 
+  - 
+  
+CV in Time Series 
+  - because the ordering matters, we have to be careful with CV  
+      - up until now, we've been okay with k-fold cv with random data 
+  - the way that we split is changing: now we just chop off the end 
+  
+Exponential Smoothing - predict using a smoothing of past observations 
+  - tuning is alpha (0,1): the smooths estimate at time t is a weight of that observation + a (1-alpha) x something of the observation before
+     - the weights decrease exponentially 
+     - we need to know what comes before and at a specific time period 
+  - alpha = 0 gives a flat line 
+  - alpha = 1 has no smoothing; overfitting 
+
+Triple ES: each term has an alpha value - think of this as a weighted average 
+  - same thing except for a linear trend (regression changes over time)  
+     - smooths within seasons, trends, and observations (see above)
+  types of smoothing:
+     - none 
+     - additive (original scale) 
+     - multiplicative (log scale) 
+  
+  
+```{r}
+library(tidyverse) 
+library(tidymodels)
+library(parsnip) 
+library(modeltime)
+library(patchwork)
+
+storeItem1 <- train %>% 
+  dplyr::filter(store == 5, item == 13)
+storeItem2 <- train %>% 
+  dplyr::filter(store == 7, item == 46) 
+
+split1 <- time_series_split(storeItem1, assess="3 months", cumulative = TRUE) 
+split2 <- time_series_split(storeItem2, assess="3 months", cumulative = TRUE)
+
+es_model1 <- exp_smoothing() %>% 
+  set_engine("ets") %>% 
+  fit(sales~date, data = training(split1)) 
+
+es_model2 <- exp_smoothing() %>% 
+  set_engine("ets") %>% 
+  fit(sales~date, data = training(split2)) 
+
+cv_results1 <- modeltime_calibrate(es_model1, 
+                                  new_data = testing(split1)) 
+
+cv_results2 <- modeltime_calibrate(es_model2, 
+                                  new_data = testing(split2)) 
+
+## Visualize - TOP ROW 
+si1_top <- cv_results1 %>% 
+  modeltime_forecast(
+    new_data = testing(split1), 
+    actual_data = storeItem1
+  ) %>% 
+  plot_modeltime_forecast(.interactive = TRUE) 
+
+si2_top <- cv_results2 %>% 
+  modeltime_forecast(
+    new_data = testing(split2), 
+    actual_data = storeItem2
+  ) %>% 
+  plot_modeltime_forecast(.interactive = TRUE) 
+
+## Evaluate Accuracy 
+cv_results1 %>% 
+  modeltime_accuracy() %>% 
+  table_modeltime_accuracy(
+    .interactive = FALSE
+  )
+
+cv_results2 %>% 
+  modeltime_accuracy() %>% 
+  table_modeltime_accuracy(
+    .interactive = FALSE
+  )
+
+es_fullfit1 <- cv_results1 %>% 
+  modeltime_refit(data = storeItem1) 
+
+es_fullfit2 <- cv_results2 %>% 
+  modeltime_refit(data = storeItem2) 
+
+es_preds1 <- es_fullfit1 %>% 
+  modeltime_forecast(h = "3 months") %>% 
+  rename(date = .index, sales = .value) %>%  
+  select(date, sales) %>% 
+  full_join(., y=test, by = "date") %>% 
+  select(id, sales) 
+
+es_preds2 <- es_fullfit2 %>% 
+  modeltime_forecast(h = "3 months") %>% 
+  rename(date = .index, sales = .value) %>%  
+  select(date, sales) %>% 
+  full_join(., y=test, by = "date") %>% 
+  select(id, sales) 
+
+si1bottom <- es_fullfit1 %>% 
+  modeltime_forecast(h = "3 months", actual_data = storeItem1) %>% 
+  plot_modeltime_forecast(.interactive =FALSE) 
+
+si2bottom <- es_fullfit2 %>% 
+  modeltime_forecast(h = "3 months", actual_data = storeItem2) %>% 
+  plot_modeltime_forecast(.interactive =FALSE) 
+
+plotly::subplot(si1_top, si2_top, si1bottom, si2bottom, nrows=2)
+
+```
+
+  
+top row is the cv results 
+bottom is es_fullfit 
+
+
